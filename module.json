@@ -1,0 +1,14 @@
+{
+  "id": "desk-pet",
+  "name": "Desk Pet",
+  "icon": "🐾",
+  "description": "A little sprite creature that walks your screen, flips, follows your cursor when it's near, and can be picked up and tossed around with real physics. Right-click for a compact menu (species, tricks, feed, toys) and a Pokemon-style PVP battle mode.",
+  "ui": [
+    "desk-pet-dog.js",
+    "desk-pet-dino.js",
+    "desk-pet-battle.js",
+    "desk-pet.js"
+  ],
+  "enabled": true,
+  "created_at": "2026-09-09T18:11:10-04:00"
+}
