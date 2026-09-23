@@ -299,7 +299,9 @@
   /* ------------------------------------------------------------------ *
    *  PET CONTROLLER — physics, AI, input.
    * ------------------------------------------------------------------ */
-  function makePet() {
+  function makePet(opts) {
+    opts = opts || {};
+    var mySpecies = SPECIES_CRY[opts.species] ? opts.species : species;
     var SIZE = 120, HALF = SIZE / 2, FEET = 34;
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -337,6 +339,21 @@
       eatT: 0,                  // munching timer when standing over food
       say: null, sayT: 0,       // speech bubble text
     };
+    p.speedMul = 1; p.spinV = 0; p.rotHold = 0;
+    p.act = null; p.lastAct = null;
+    var world = window.__deskPetWorld || null;
+    var scrappy = true;   // false = never swipes at the cursor
+    function pick(a) { return a[(Math.random() * a.length) | 0]; }
+    var brain = window.__deskPetBrain || null;
+    var brainCtx = {
+      p: p,
+      say: function (t) { say(t); },
+      startHop: function (x) { startHop(x); },
+      startFlip: function () { startFlip(); },
+      species: function () { return mySpecies; },
+    };
+    if (brain) brain.register(brainCtx);
+
     var item = null;            // active toy / food on the floor
     var itemDrag = { on: false, samples: [] };
     var mouse = { x: -9999, y: -9999, has: false, moved: 0 };
@@ -425,6 +442,7 @@
       }
       p.vx = Math.max(-1800, Math.min(1800, vx));
       p.vy = Math.max(-1800, Math.min(1800, vy));
+      if (Math.abs(vx) + Math.abs(vy) < 90 && brain) { brain.petted(brainCtx); }
       p.mode = "air";
       p.angVel = (p.vx / 260) + (Math.random() - 0.5) * 4;
       p.eye = Math.abs(p.vx) + Math.abs(p.vy) > 700 ? "scared" : "open";
@@ -465,24 +483,18 @@
       "filter:drop-shadow(0 3px 5px rgba(0,0,0,.5));will-change:transform;";
     document.body.appendChild(itemEl);
 
-    /** spawn a toy or food item near the cursor and let the pet notice it */
+    /** drop a toy/food into the SHARED world — every pet can chase it */
     function spawnItem(def, kind, atX, atY) {
-      item = {
-        def: def, kind: kind,
-        x: atX, y: atY, vx: (Math.random() - 0.5) * 200, vy: -260,
-        rot: 0, angVel: (Math.random() - 0.5) * 10,
-        life: kind === "food" ? 26 : 34, bites: 3, gone: false,
-      };
-      itemEl.textContent = def.glyph;
-      itemEl.style.display = "block";
-      p.emote = null; p.restT = 0; p.trick = null;
+      if (!world) return;
+      if (def.id === "laser") { world.laserOn(); say("!!!"); p.eye = "scared"; p.act = null; return; }
+      world.spawn(def, kind, atX, atY);
+      p.emote = null; p.restT = 0; p.trick = null; p.act = null;
       p.eye = "happy"; p.mouth = "happy";
       say(kind === "food" ? "nom?" : "oooh!");
     }
 
     function clearItem() {
-      item = null;
-      itemEl.style.display = "none";
+      if (world) world.clearAll();
     }
 
     function onItemDown(e) {
@@ -544,11 +556,12 @@
 
     /** swap the sprite sheets between cat and dog, keeping position + state */
     function setSpecies(kind) {
-      if (kind === species) return;
+      if (kind === mySpecies) return;
+      mySpecies = kind;
       species = kind;
       p.emote = "love"; p.emoteT = 1.1;
       say(SPECIES_CRY[kind]);
-      store.set({ on: true, species: species });
+      saveState();
     }
 
     /* ---- commanded tricks ---- */
@@ -556,7 +569,7 @@
       p.emote = null; p.restT = 0; p.zoomLeft = 0;
       p.trick = kind; p.trickT = kind === "spin" ? 1.1 : 1.6;
       p.eye = "happy"; p.mouth = "happy"; p.ears = 1;
-      say(kind === "speak" ? SPECIES_CRY[species] : (TRICK_WORDS[kind] || "!"));
+      say(kind === "speak" ? SPECIES_CRY[mySpecies] : (TRICK_WORDS[kind] || "!"));
       if (kind === "sit") { p.action = "sit"; p.vx = 0; }
       else if (kind === "spin") { p.action = "idle"; p.vx = 0; p.angVel = 14; p.rot = 0; }
       else if (kind === "flip") { startFlip(); p.trickT = 1.2; }
@@ -670,7 +683,22 @@
         TOYS.forEach(function (t) {
           row(t.name, t.glyph, function () { spawnItem(t, "toy", mx, my - 40); });
         });
-        row("Put Away Toy", "🧹", function () { clearItem(); });
+        row("Laser Pointer", "🔦", function () { if (world) { world.laserOn(); say("!!!"); } });
+        row("Put Pointer Away", "🚫", function () { if (world) world.laserOff(); });
+        row("Put Away Toys", "🧹", function () { clearItem(); });
+        row(scrappy ? "Playful Mode: OFF" : "Playful Mode: ON", scrappy ? "😾" : "😺", function () {
+          scrappy = !scrappy;
+          say(scrappy ? "grrr" : "\u2665");
+        });
+      });
+      sep();
+      group("Pets", "👥", function () {
+        row("Spawn Another Pet", "➕", function () { spawnPet(mySpecies); });
+        row("Spawn a Cat", "🐱", function () { spawnPet("cat"); });
+        row("Spawn a Dog", "🐶", function () { spawnPet("dog"); });
+        row("Spawn a Dino", "🦖", function () { spawnPet("dino"); });
+        row("Remove This Pet", "✖", function () { removePet(self); });
+        row("Remove All Pets", "🚫", function () { removeAllPets(); });
       });
       sep();
       group("PVP Battle", "⚔️", function () {
@@ -696,8 +724,8 @@
       var api = window.__deskPetBattle;
       if (!api) return;
       p.emote = "bang"; p.emoteT = 1; p.ears = 1;
-      say(SPECIES_CRY[species]);
-      api.start(species, rival, function (result) {
+      say(SPECIES_CRY[mySpecies]);
+      api.start(mySpecies, rival, function (result) {
         if (result === "win") { p.emote = "love"; p.emoteT = 2.2; say("winner!"); doTrick("spin"); }
         else { p.emote = "sleep"; p.emoteT = 2.6; say("x_x"); doTrick("play"); }
       });
@@ -734,49 +762,91 @@
         return;
       }
 
-      // a toy or food on the floor beats every other urge
-      if (item && !itemDrag.on) {
-        var idx = item.x - p.x, idy = item.y - p.y;
-        var idist = Math.hypot(idx, idy);
-        p.restT = 0; p.ears = 1; p.mouth = "happy"; p.eye = "happy";
-        if (idist < 46) {
-          if (item.kind === "food") {
-            p.action = "sit"; p.vx *= 0.5;
-            p.eatT += dt;
-            if (p.eatT > 0.55) {
-              p.eatT = 0; item.bites--;
-              say("nom!"); p.emote = "love"; p.emoteT = 0.8;
-              if (item.bites <= 0) { clearItem(); say("thanks!"); p.emote = "love"; p.emoteT = 1.6; }
-            }
-          } else {
-            // bat the toy away like a real cat
-            p.action = "idle";
-            var swat = (idx >= 0 ? 1 : -1);
-            item.vx = swat * (420 + Math.random() * 380);
-            item.vy = -(320 + Math.random() * 320);
-            item.angVel = swat * 16;
-            p.dir = swat; p.emote = "fight";
-            p.emoteT = 0.4; p.fightWord = FIGHT_WORDS[(Math.random() * FIGHT_WORDS.length) | 0];
-          }
-          return;
-        }
-        // run it down; hop if it's up in the air
+      // THE LASER outranks everything — unless this pet is actually hungry
+      // and there's food on the floor. Food beats the red dot.
+      var foodOut = world ? world.nearestFood(p.x, p.y) : null;
+      var starving = p.needs && p.needs.energy < 0.7;
+      if (world && world.laserActive() && !(foodOut && starving)) {
+        var L = world.laserPos();
+        var ldx = L.x - p.x, ldy = L.y - p.y;
+        var ldist = Math.hypot(ldx, ldy);
+        p.act = null; p.restT = 0; p.ears = 1; p.eye = "scared"; p.mouth = "happy";
         p.action = "follow";
-        p.targetX = item.x;
-        p.dir = idx >= 0 ? 1 : -1;
-        if (idy < -80 && Math.abs(idx) < 90 && p.pounceT <= 0) { startHop(item.x); p.pounceT = 0.7; }
+        p.targetX = L.x;
+        p.speedMul = 2.6;
+        p.dir = ldx >= 0 ? 1 : -1;
+        if (ldist < 52) {
+          // pounce ON it and always come up with nothing
+          if (p.pounceT <= 0) {
+            p.pounceT = 0.85;
+            p.emote = "fight"; p.emoteT = 0.4;
+            p.fightWord = FIGHT_WORDS[(Math.random() * FIGHT_WORDS.length) | 0];
+            p.sx = 1.3; p.sy = 0.72;
+            if (Math.random() < 0.35) say(pick(["got it!", "almost!", "where'd it go", "RAAA"]));
+          }
+          p.action = "idle";
+        } else if (ldy < -70 && Math.abs(ldx) < 110 && p.pounceT <= 0) {
+          startHop(L.x); p.pounceT = 0.7;
+        }
         return;
       }
 
-      // POUNCE + FIGHT: cursor is right on top of the pet -> scrap with it (comic cloud)
+      // a toy or food anywhere in the SHARED world beats every other urge
+      var wItem = (foodOut && starving) ? foodOut : (world ? world.nearest(p.x, p.y) : null);
+      if (wItem && !world.dragging(wItem)) {
+        var idx = wItem.x - p.x, idy = wItem.y - p.y;
+        var idist = Math.hypot(idx, idy);
+        p.act = null;
+        p.restT = 0; p.ears = 1; p.mouth = "happy"; p.eye = "happy";
+        if (idist < 46) {
+          if (wItem.kind === "food") {
+            p.action = "sit"; p.vx *= 0.5;
+            p.eatT += dt;
+            if (p.eatT > 0.55) {
+              p.eatT = 0;
+              var r = world.bite(wItem);
+              if (r === "last") { say("thanks!"); p.emote = "love"; p.emoteT = 1.6; }
+              else if (r === "bite") { say("nom!"); p.emote = "love"; p.emoteT = 0.8; }
+            }
+          } else {
+            // bat the toy away — but only if another pet didn't just hit it
+            p.action = "idle";
+            var swat = (idx >= 0 ? 1 : -1);
+            if (world.swat(wItem, swat)) {
+              p.dir = swat; p.emote = "fight";
+              p.emoteT = 0.4; p.fightWord = FIGHT_WORDS[(Math.random() * FIGHT_WORDS.length) | 0];
+            }
+          }
+          return;
+        }
+        // race it down; hop if it's up in the air
+        p.action = "follow";
+        p.targetX = wItem.x;
+        p.speedMul = 1.9;
+        p.dir = idx >= 0 ? 1 : -1;
+        if (idy < -80 && Math.abs(idx) < 90 && p.pounceT <= 0) { startHop(wItem.x); p.pounceT = 0.7; }
+        return;
+      }
+
+      // cursor right on top of the pet — mostly friendly, rarely a scrap
       if (mouseLive && dist < 58 && p.emote !== "fight" && p.pounceT <= 0) {
-        p.emote = "fight"; p.emoteT = 0.55 + Math.random() * 0.35;
-        p.fightWord = FIGHT_WORDS[(Math.random() * FIGHT_WORDS.length) | 0];
-        p.action = "idle"; p.mouth = "neutral"; p.eye = "scared";
-        p.vx += (mdx > 0 ? 1 : -1) * -40;    // recoil away from the cursor
-        p.dir = mdx > 0 ? 1 : -1;
-        p.pounceT = 1.1;
+        p.pounceT = 2.4 + Math.random() * 2;
         p.restT = 0;
+        p.dir = mdx > 0 ? 1 : -1;
+        // feisty pets scrap sometimes; everyone else just enjoys the attention
+        var feisty = (p.mood === "grumpy" ? 0.3 : p.mood === "hyper" ? 0.16 : 0.06);
+        if (scrappy && Math.random() < feisty) {
+          p.emote = "fight"; p.emoteT = 0.55 + Math.random() * 0.35;
+          p.fightWord = FIGHT_WORDS[(Math.random() * FIGHT_WORDS.length) | 0];
+          p.action = "idle"; p.mouth = "neutral"; p.eye = "scared";
+          p.vx += (mdx > 0 ? 1 : -1) * -40;
+        } else {
+          p.action = "idle"; p.vx *= 0.4;
+          p.emote = "love"; p.emoteT = 1.2;
+          p.eye = "happy"; p.mouth = "happy"; p.ears = 1;
+          p.needs && (p.needs.social = Math.min(1, p.needs.social + 0.3));
+          if (Math.random() < 0.5) say(pick(["hi!", "\u2665", "prrr", "hey you", "*leans in*"]));
+        }
         return;
       }
       if (p.emote === "fight") { p.action = "idle"; return; } // stay put mid-brawl
@@ -812,6 +882,10 @@
         return;
       }
 
+      // ---- BRAIN: needs-driven behaviours own the pet when they fire ----
+      if (brain && brain.step(brainCtx, dt)) return;
+      if (p.thinkT <= 0 && brain && brain.choose(brainCtx)) return;
+
       if (p.thinkT <= 0) {
         var roll = Math.random();
         if (roll < 0.24) { p.action = "wander"; p.targetX = 60 + Math.random() * (window.innerWidth - 120); p.thinkT = 2 + Math.random() * 3; }
@@ -823,11 +897,7 @@
           p.targetX = 60 + Math.random() * (window.innerWidth - 120);
           p.thinkT = 0.5; p.emote = "zoom"; p.emoteT = 0.7;
         }
-        else if (roll < 0.92) { // go sit on the chat box / session list
-          var spot = findFavoriteSpot();
-          if (spot) { hopToSpot(spot); p.thinkT = 3 + Math.random() * 3; }
-          else { p.action = "sit"; p.thinkT = 2 + Math.random() * 2; }
-        }
+        else if (roll < 0.92) { p.action = "idle"; p.thinkT = 2 + Math.random() * 2; }
         else { p.action = "sit"; p.thinkT = 2 + Math.random() * 3; }
         p.mouth = "neutral";
       }
@@ -841,13 +911,8 @@
       targetX = Math.max(HALF, Math.min(window.innerWidth - HALF, targetX));
       var dx = targetX - p.x;
       p.dir = dx >= 0 ? 1 : -1;
-      var perch = findPerch(targetX, p.y - 40);
       var vy = -980;
-      if (perch) { // scale jump power to clear the ledge
-        var rise = (p.y) - perch.top;
-        vy = -Math.min(1700, Math.sqrt(2 * GRAV * Math.max(120, rise + 30)));
-        p.perchTop = perch.top; p.perchL = perch.left; p.perchR = perch.right;
-      } else { p.perchTop = 0; }
+      p.perchTop = 0;
       p.mode = "air"; p.vy = vy;
       p.vx = Math.max(-520, Math.min(520, dx * 1.8));
       p.angVel = 0; p.eye = "happy"; p.mouth = "happy"; p.action = "flip";
@@ -896,13 +961,6 @@
         // walls
         if (p.x < HALF - 40) { p.x = HALF - 40; p.vx = Math.abs(p.vx) * 0.5; p.angVel *= -0.5; }
         if (p.x > window.innerWidth - HALF + 40) { p.x = window.innerWidth - HALF + 40; p.vx = -Math.abs(p.vx) * 0.5; p.angVel *= -0.5; }
-        // catch a targeted element ledge on the way down
-        if (p.perchTop && p.vy > 0 && p.y >= p.perchTop && p.y <= p.perchTop + 26 &&
-            p.x > p.perchL - 10 && p.x < p.perchR + 10) {
-          p.y = p.perchTop; p.vy = 0; p.vx *= 0.4; p.angVel = 0; p.rot = 0;
-          p.mode = "perch"; p.action = "idle"; p.thinkT = 1.2 + Math.random() * 2;
-          p.sx = 1.25; p.sy = 0.75; p.eye = "happy"; p.emote = "love"; p.emoteT = 1.1;
-        }
         // land
         if (p.y >= fY) {
           p.perchTop = 0;
@@ -923,11 +981,13 @@
         think(dt);
         // spinning trick keeps turning; otherwise ease upright
         if (p.trick === "spin") p.rot += p.angVel * dt;
+        else if (p.spinV) p.rot += p.spinV * dt;
+        else if (p.rotHold) p.rot += (p.rotHold - p.rot) * Math.min(1, dt * 14);
         else p.rot += (0 - p.rot) * Math.min(1, dt * 12);
         var moving = p.action === "wander" || p.action === "follow";
         if (moving) {
           var dx = p.targetX - p.x;
-          var speed = p.zoomLeft > 0 ? 430 : (p.action === "follow" ? 190 : 95);
+          var speed = (p.zoomLeft > 0 ? 430 : (p.action === "follow" ? 190 : 95)) * (p.speedMul == null ? 1 : p.speedMul);
           if (Math.abs(dx) > 14) {
             var dirWant = dx > 0 ? 1 : -1;
             p.dir = dirWant;
@@ -973,8 +1033,8 @@
       var spd = Math.abs(p.vx);
 
       // pick animation state + its sheet geometry (per species)
-      var dog = species === "dog" ? window.__deskPetDog
-              : species === "dino" ? window.__deskPetDino : null;
+      var dog = mySpecies === "dog" ? window.__deskPetDog
+              : mySpecies === "dino" ? window.__deskPetDino : null;
       var sheet, fw, fh, FRAMES;
       var state = (p.mode === "air" || p.mode === "drag") ? "jump"
                 : spd > 150 ? "run"
@@ -1078,8 +1138,10 @@
 
     var raf = requestAnimationFrame(tick);
 
-    return {
+    var self = {
+      get species() { return mySpecies; },
       destroy: function () {
+        if (brain) brain.unregister(brainCtx);
         cancelAnimationFrame(raf);
         el.removeEventListener("pointerdown", onDown);
         window.removeEventListener("pointermove", onMove);
@@ -1091,6 +1153,7 @@
         el.remove(); shadow.remove(); itemEl.remove();
       },
     };
+    return self;
   }
 
   /* ------------------------------------------------------------------ *
@@ -1098,26 +1161,67 @@
    * ------------------------------------------------------------------ */
   var store = PallariumModules.store(MOD);
   var btnRef = null;
+  var pets = [];
+  var MAX_PETS = 8;
+
+  function saveState() {
+    store.set({
+      on: pets.length > 0,
+      species: species,
+      pets: pets.map(function (pt) { return pt.species; }).slice(0, MAX_PETS),
+    });
+    if (btnRef) btnRef.style.opacity = pets.length ? "1" : "0.5";
+  }
+  window.__deskPetSave = saveState;
+
+  function spawnPet(kind) {
+    if (pets.length >= MAX_PETS) return null;
+    var pt = makePet({ species: kind || species });
+    pets.push(pt);
+    controller = pets[0];
+    saveState();
+    return pt;
+  }
+  window.__deskPetSpawn = spawnPet;
+
+  function removePet(pt) {
+    var i = pets.indexOf(pt);
+    if (i < 0) return;
+    pets.splice(i, 1);
+    pt.destroy();
+    controller = pets[0] || null;
+    saveState();
+  }
+  window.__deskPetRemove = removePet;
+
+  function removeAllPets() {
+    pets.forEach(function (pt) { pt.destroy(); });
+    pets = [];
+    controller = null;
+    saveState();
+  }
+  window.__deskPetRemoveAll = removeAllPets;
 
   function setPet(on) {
-    if (on && !controller) controller = makePet();
-    if (!on && controller) { controller.destroy(); controller = null; }
-    if (btnRef) btnRef.style.opacity = on ? "1" : "0.5";
-    store.set({ on: on, species: species });
+    if (on && !pets.length) spawnPet(species);
+    else if (!on) removeAllPets();
+    saveState();
   }
 
   PallariumModules.addHeaderButton(MOD, "🐾", "Desk Pet — toggle your screen buddy", function () {
-    setPet(!controller);
+    setPet(!pets.length);
   });
   // grab the button element to reflect state (best-effort)
   setTimeout(function () { btnRef = document.querySelector('[data-mod-btn="' + MOD + '"]') || null; }, 0);
 
   store.get().then(function (d) {
     if (d && SPECIES_CRY[d.species]) species = d.species;
-    if (d && d.on) setPet(true);
+    if (d && d.pets && d.pets.length) {
+      d.pets.slice(0, MAX_PETS).forEach(function (s) { spawnPet(SPECIES_CRY[s] ? s : species); });
+    } else if (d && d.on) setPet(true);
   }).catch(function () {});
 
   PallariumModules.onTeardown(MOD, function () {
-    if (controller) { controller.destroy(); controller = null; }
+    removeAllPets();
   });
 })();

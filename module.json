@@ -7,6 +7,8 @@
     "desk-pet-dog.js",
     "desk-pet-dino.js",
     "desk-pet-battle.js",
+    "desk-pet-world.js",
+    "desk-pet-brain.js",
     "desk-pet.js"
   ],
   "enabled": true,
