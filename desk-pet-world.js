@@ -19,6 +19,17 @@
   var MAX_ITEMS = 6;
   var items = [];
   var drag = { item: null, ox: 0, oy: 0, samples: [] };
+  var alive = true;
+
+  // A previous copy of this module leaves its DOM behind when the file is
+  // re-injected: the old closure dies but its elements never do. Sweep any
+  // orphans before we start, and stop the old loop if it is still running.
+  (function reapOldInstance() {
+    var old = document.querySelectorAll("[data-desk-pet-world]");
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    var prev = window.__deskPetWorld;
+    if (prev && typeof prev.__kill === "function") { try { prev.__kill(); } catch (e) {} }
+  })();
 
   /* ------------------------------------------------------------------ *
    *  items (toys + food)
@@ -30,6 +41,7 @@
       "font-size:30px;z-index:2147483001;cursor:grab;user-select:none;touch-action:none;" +
       "filter:drop-shadow(0 3px 5px rgba(0,0,0,.5));will-change:transform;";
     el.textContent = glyph;
+    el.setAttribute("data-desk-pet-world", "item");
     document.body.appendChild(el);
     return el;
   }
@@ -64,29 +76,38 @@
     laserOff();
   }
 
-  /** closest item to a point, ignoring one being dragged */
-  function nearest(x, y) {
-    var best = null, bd = 1e9;
+  /* claims: each pet calls dibs on ONE item so a crew spreads out across
+   * the pile instead of all piling onto the same toy. A claim lapses if the
+   * owner stops refreshing it (got distracted, picked up, went to bed). */
+  function claimedByOther(it, owner) {
+    return it.owner && it.owner !== owner && performance.now() - it.ownerT < 600;
+  }
+  function claim(it, owner) {
+    if (!it || !owner) return;
+    it.owner = owner; it.ownerT = performance.now();
+  }
+
+  /** closest item a pet may go for: its own claim first, then any unclaimed
+   *  item, and only if EVERY item is taken does it share one */
+  function pickFor(x, y, owner, foodOnly) {
+    var mine = null, free = null, fd = 1e9, any = null, ad = 1e9;
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       if (it === drag.item) continue;
+      if (it.heldBy && it.heldBy !== owner) continue;   // in someone's mouth
+      if (foodOnly && it.kind !== "food") continue;
       var d = Math.hypot(it.x - x, it.y - y);
-      if (d < bd) { bd = d; best = it; }
+      if (owner && it.owner === owner && !claimedByOther(it, owner)) mine = it;
+      if (d < ad) { ad = d; any = it; }
+      if (!owner || !claimedByOther(it, owner)) { if (d < fd) { fd = d; free = it; } }
     }
+    var best = mine || free || any;
+    if (best && owner && !claimedByOther(best, owner)) claim(best, owner);
     return best;
   }
-
+  function nearest(x, y, owner) { return pickFor(x, y, owner, false); }
   /** closest FOOD item only — hunger overrides the laser */
-  function nearestFood(x, y) {
-    var best = null, bd = 1e9;
-    for (var i = 0; i < items.length; i++) {
-      var it = items[i];
-      if (it === drag.item || it.kind !== "food") continue;
-      var d = Math.hypot(it.x - x, it.y - y);
-      if (d < bd) { bd = d; best = it; }
-    }
-    return best;
-  }
+  function nearestFood(x, y, owner) { return pickFor(x, y, owner, true); }
 
   /** a pet whacks a toy. returns false if another pet just hit it */
   function swat(it, dir) {
@@ -97,6 +118,38 @@
     it.angVel = dir * 16;
     it.life = Math.max(it.life, 14);
     return true;
+  }
+
+  /** a pet picks an item up in its mouth (dog fetch). physics pauses while held */
+  function hold(it, owner) {
+    if (!it || items.indexOf(it) < 0 || drag.item === it) return false;
+    it.heldBy = owner; it.vx = it.vy = 0; it.angVel = 0;
+    it.life = Math.max(it.life, 20);
+    return true;
+  }
+  /** drop / toss a held item */
+  function release(it, vx, vy) {
+    if (!it) return;
+    it.heldBy = null;
+    it.vx = vx || 0; it.vy = vy || 0; it.angVel = (vx || 0) / 50;
+    it.life = Math.max(it.life, 14);
+  }
+  function has(it) { return items.indexOf(it) >= 0; }
+
+  /** a heavy footfall: everything near the floor around x jumps */
+  function quake(x, radius) {
+    var fY = window.innerHeight - 34 + 18;
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it === drag.item || it.heldBy) continue;
+      var d = Math.abs(it.x - x);
+      if (d > radius || it.y < fY - 60) continue;
+      var k = 1 - d / radius;
+      it.vy = -(380 + Math.random() * 320) * (0.4 + k);
+      it.vx += (it.x >= x ? 1 : -1) * 160 * k;
+      it.angVel = (Math.random() - 0.5) * 18;
+      it.life = Math.max(it.life, 10);
+    }
   }
 
   /** a pet takes a bite. returns "bite" | "last" | false */
@@ -110,6 +163,7 @@
 
   /* ---- dragging any item with the mouse ---- */
   function onDown(e, it) {
+    it.heldBy = null;   // you can steal it right out of a pet's mouth
     drag.item = it;
     drag.ox = e.clientX - it.x; drag.oy = e.clientY - it.y;
     drag.samples = [{ t: performance.now(), x: it.x, y: it.y }];
@@ -161,6 +215,7 @@
     lcv.style.cssText =
       "position:fixed;left:0;top:0;width:180px;height:180px;pointer-events:none;" +
       "z-index:2147483002;will-change:transform;mix-blend-mode:screen;";
+    lcv.setAttribute("data-desk-pet-world", "laser");
     document.body.appendChild(lcv);
     lctx = lcv.getContext("2d");
     return lcv;
@@ -296,15 +351,103 @@
   /* ------------------------------------------------------------------ *
    *  physics + render loop (one for the whole world)
    * ------------------------------------------------------------------ */
+  /* ------------------------------------------------------------------ *
+   *  platforms — real UI elements the pets can stand on
+   * ------------------------------------------------------------------ */
+  // only the BIG, solid surfaces are climbable: the chat bar, the header,
+  // panels and cards. Buttons, chips, list rows and tiny widgets are off
+  // limits so the pets stop scaling every pixel of the UI.
+  var PLAT_SEL = [
+    "[data-desk-pet-platform]",
+    ".composer", ".input-bar", ".chat-input",
+    "header", ".toolbar", ".titlebar",
+    ".card", ".panel",
+  ].join(",");
+  var MAX_PLATS = 8;
+
+  var plats = [], platT = 0;
+
+  function scanPlatforms() {
+    var out = [], seen = [];
+    // wide sweep: ANY visible box with a real top edge is standable — buttons,
+    // cards, chips, widgets, panels, icons. Named selectors missed most of the UI.
+    var els = document.body.querySelectorAll(PLAT_SEL);
+    for (var i = 0; i < els.length && out.length < MAX_PLATS; i++) {
+      var el = els[i];
+      if (el.closest("[data-desk-pet-menu]")) continue;
+      if (el.hasAttribute("data-desk-pet-world")) continue;
+      var tag = el.tagName;
+      if (tag === "SCRIPT" || tag === "STYLE" || tag === "svg" || tag === "path" ||
+          tag === "BR" || tag === "CANVAS") continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 160 || r.height < 36) continue;
+      if (r.top < 4 || r.top > window.innerHeight - 24) continue;
+      // skip full-page wrappers — you can't stand on the whole app
+      if (r.width > window.innerWidth * 0.9 && r.height > window.innerHeight * 0.6) continue;
+      var st = getComputedStyle(el);
+      if (st.visibility === "hidden" || st.display === "none" || +st.opacity < 0.2) continue;
+      if (st.position === "fixed" && r.height > window.innerHeight * 0.7) continue;
+      // skip near-duplicate ledges stacked on the same line
+      var dup = false;
+      for (var k = 0; k < seen.length; k++) {
+        if (Math.abs(seen[k].y - r.top) < 10 && Math.abs(seen[k].x - r.left) < 24) { dup = true; break; }
+      }
+      if (dup) continue;
+      seen.push({ x: r.left, y: r.top });
+      out.push({ x1: r.left + 6, x2: r.right - 6, y: r.top, w: r.width });
+    }
+    out.sort(function (a, b) { return a.y - b.y; });
+    plats = out;
+  }
+
+  /** the ledge a pet standing at x,y is resting on (or null for the floor) */
+  function platformUnder(x, y, vy, prevY) {
+    if (vy < 0) return null;                 // rising — pass through
+    // swept test: did the feet CROSS the ledge line between frames?
+    // a point test misses entirely at 1500px/s.
+    if (prevY == null) prevY = y - 6;
+    var best = null;
+    for (var i = 0; i < plats.length; i++) {
+      var p = plats[i];
+      if (x < p.x1 || x > p.x2) continue;
+      if (prevY > p.y + 4) continue;         // we were already below it
+      if (y < p.y) continue;                 // haven't reached it yet
+      if (!best || p.y < best.y) best = p;
+    }
+    return best;
+  }
+
+  /** best ledge to aim for when trying to reach a target point */
+  function platformToward(fromX, fromY, tx, ty) {
+    var best = null, bs = -1e9;
+    for (var i = 0; i < plats.length; i++) {
+      var p = plats[i];
+      if (p.y >= fromY - 10) continue;                  // must be above us
+      if (p.y < ty - 260) continue;                     // not way past the target
+      var reachX = Math.max(p.x1, Math.min(p.x2, tx));
+      var climb = fromY - p.y;
+      if (climb > 430) continue;                        // too high for one hop
+      var run = Math.abs(reachX - fromX);
+      if (run > 760) continue;
+      var score = -climb * 0.5 - run * 0.7 - Math.abs(reachX - tx) * 0.9;
+      if (score > bs) { bs = score; best = { x: reachX, y: p.y, p: p }; }
+    }
+    return best;
+  }
+
   var last = performance.now();
   function tick(now) {
+    if (!alive) return;
     var dt = Math.min(0.033, (now - last) / 1000); last = now;
+    platT -= dt;
+    if (platT <= 0) { platT = 0.5; scanPlatforms(); }
     var fY = window.innerHeight - 34 + 18;
 
     for (var i = items.length - 1; i >= 0; i--) {
       var it = items[i];
       if (it.cool > 0) it.cool -= dt;
       if (it === drag.item) { it.rot += dt * 6; }
+      else if (it.heldBy) { it.rot += (0 - it.rot) * Math.min(1, dt * 10); } // carried: the pet moves it
       else {
         it.life -= dt;
         if (it.life <= 0) { remove(it); continue; }
@@ -337,13 +480,27 @@
     clearAll: clearAll,
     nearest: nearest,
     nearestFood: nearestFood,
+    claim: claim,
     swat: swat,
     bite: bite,
+    hold: hold,
+    release: release,
+    has: has,
+    quake: quake,
     count: function () { return items.length; },
     dragging: function (it) { return drag.item === it; },
     laserOn: laserOn,
     laserOff: laserOff,
     laserActive: function () { return laser.on; },
     laserPos: function () { return { x: laser.x + laser.jx, y: laser.y + laser.jy }; },
+    platformUnder: platformUnder,
+    platformToward: platformToward,
+    platforms: function () { return plats; },
+    __kill: function () {
+      alive = false;
+      items.slice().forEach(remove);
+      laserOff();
+      if (lcv) { lcv.remove(); lcv = null; lctx = null; }
+    },
   };
 })();

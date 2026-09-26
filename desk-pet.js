@@ -302,6 +302,9 @@
   function makePet(opts) {
     opts = opts || {};
     var mySpecies = SPECIES_CRY[opts.species] ? opts.species : species;
+    // cats are the quick ones, dogs the baseline, dinos lumber
+    var SPECIES_SPEED = { cat: 1.4, dog: 1.0, dino: 0.85 };
+    function speciesSpeed() { return SPECIES_SPEED[mySpecies] || 1; }
     var SIZE = 120, HALF = SIZE / 2, FEET = 34;
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -701,6 +704,21 @@
         row("Remove All Pets", "🚫", function () { removeAllPets(); });
       });
       sep();
+      group("Home & Events", "🏠", function () {
+        row("Everyone Go Home", "🛏️", function () { var h = window.__deskPetHome; if (h) h.sendHome(); });
+        row("Snack Rain", "🍗", function () { var h = window.__deskPetHome; if (h) h.fire("snackRain"); });
+        row("Toy Storm", "🧸", function () { var h = window.__deskPetHome; if (h) h.fire("toyStorm"); });
+        row("Zoomies Hour", "⚡", function () { var h = window.__deskPetHome; if (h) h.fire("zoomies"); });
+        row("Release a Butterfly", "🦋", function () { var h = window.__deskPetHome; if (h) h.fire("butterfly"); });
+        row("Loose Mouse", "🐁", function () { var h = window.__deskPetHome; if (h) h.fire("mouse"); });
+        row("Thunderstorm", "⛈️", function () { var h = window.__deskPetHome; if (h) h.fire("storm"); });
+        row("Nap Time", "🌙", function () { var h = window.__deskPetHome; if (h) h.fire("naptime"); });
+        row("Throw a Party", "🎉", function () { var h = window.__deskPetHome; if (h) h.fire("party"); });
+        row("Shooting Star", "✨", function () { var h = window.__deskPetHome; if (h) h.fire("star"); });
+        row("Rainbow", "🌈", function () { var h = window.__deskPetHome; if (h) h.fire("rainbow"); });
+        row("Surprise Me", "🎲", function () { var h = window.__deskPetHome; if (h) h.fire(null); });
+      });
+      sep();
       group("PVP Battle", "⚔️", function () {
         row("Random Rival", "🎲", function () { startBattle(null); });
         row("Fight a Cat", "🐱", function () { startBattle("cat"); });
@@ -748,6 +766,7 @@
     function think(dt) {
       p.thinkT -= dt;
       if (p.pounceT > 0) p.pounceT -= dt;
+      if (p.fetchCool > 0) p.fetchCool -= dt;
       var mdx = mouse.x - p.x, mdy = mouse.y - p.y;
       var dist = Math.hypot(mdx, mdy);
       var mouseLive = mouse.has && (performance.now() - mouse.moved) < 2500;
@@ -762,9 +781,14 @@
         return;
       }
 
+      // HOME + WORLD EVENTS outrank everything: going to bed, hiding from
+      // thunder, chasing whatever critter just ran across the floor.
+      var homeApi = window.__deskPetHome;
+      if (homeApi && homeApi.drive(brainCtx, dt)) return;
+
       // THE LASER outranks everything — unless this pet is actually hungry
       // and there's food on the floor. Food beats the red dot.
-      var foodOut = world ? world.nearestFood(p.x, p.y) : null;
+      var foodOut = world ? world.nearestFood(p.x, p.y, p) : null;
       var starving = p.needs && p.needs.energy < 0.7;
       if (world && world.laserActive() && !(foodOut && starving)) {
         var L = world.laserPos();
@@ -791,8 +815,25 @@
         return;
       }
 
+      // DOG: carrying a toy back to you
+      if (p.carry) {
+        if (!world || !world.has(p.carry) || p.carry.heldBy !== p) p.carry = null;
+        else {
+          var ftx = mouse.has ? mouse.x : window.innerWidth / 2;
+          var fdx = ftx - p.x;
+          p.action = "follow"; p.targetX = ftx; p.speedMul = 1.5;
+          p.dir = fdx >= 0 ? 1 : -1; p.mouth = "happy"; p.eye = "happy"; p.ears = 1;
+          if (Math.abs(fdx) < 70) {
+            world.release(p.carry, p.dir * 120, -520); p.carry = null;
+            say(pick(["fetch!", "again!", "throw it!", "woof!"]));
+            p.emote = "love"; p.emoteT = 1; p.action = "sit"; p.thinkT = 1.2; p.fetchCool = 3;
+          }
+          return;
+        }
+      }
+
       // a toy or food anywhere in the SHARED world beats every other urge
-      var wItem = (foodOut && starving) ? foodOut : (world ? world.nearest(p.x, p.y) : null);
+      var wItem = (foodOut && starving) ? foodOut : (world ? world.nearest(p.x, p.y, p) : null);
       if (wItem && !world.dragging(wItem)) {
         var idx = wItem.x - p.x, idy = wItem.y - p.y;
         var idist = Math.hypot(idx, idy);
@@ -810,6 +851,9 @@
             }
           } else {
             // bat the toy away — but only if another pet didn't just hit it
+            if (mySpecies === "dog" && !(p.fetchCool > 0) && world.hold(wItem, p)) {
+              p.carry = wItem; say(pick(["mine!", "got it!", "*proud*"])); return;
+            }
             p.action = "idle";
             var swat = (idx >= 0 ? 1 : -1);
             if (world.swat(wItem, swat)) {
@@ -857,8 +901,18 @@
         p.ears = 1;
         p.mouth = "happy";
         p.restT = 0;
-        // close but cursor is above -> hop up (maybe onto an element)
-        if (Math.abs(mdx) < 40 && mdy < -70 && p.pounceT <= 0) { startHop(mouse.x); p.pounceT = 0.8; return; }
+        // cursor is ABOVE the pet -> climb the UI: hop ledge to ledge toward it
+        if (mdy < -60 && p.pounceT <= 0) {
+          var W = window.__deskPetWorld;
+          var step = (W && W.platformToward) ? W.platformToward(p.x, p.y, mouse.x, mouse.y) : null;
+          if (step) {
+            hopToSpot({ top: step.y, left: step.p.x1, right: step.p.x2 });
+            p.pounceT = 0.55;
+            if (Math.random() < 0.25) say(pick(["hup!", "climbing!", "parkour", "wait up!"]));
+            return;
+          }
+          if (Math.abs(mdx) < 40) { startHop(mouse.x); p.pounceT = 0.8; return; }
+        }
         if (Math.abs(mdx) < 26) { p.eye = mdy < -40 ? "happy" : "open"; }
         else p.eye = "open";
         return;
@@ -887,6 +941,17 @@
       if (p.thinkT <= 0 && brain && brain.choose(brainCtx)) return;
 
       if (p.thinkT <= 0) {
+        // CAT: sometimes climbs to the highest ledge around for a nap
+        if (mySpecies === "cat" && world && world.platforms && Math.random() < 0.12) {
+          var pl = world.platforms(), topL = null;
+          for (var q = 0; q < pl.length; q++) if (pl[q].y < p.y - 60 && (!topL || pl[q].y < topL.y)) topL = pl[q];
+          if (topL) {
+            p.napClimb = true; p.thinkT = 6;
+            hopToSpot({ top: topL.y, left: topL.x1, right: topL.x2 });
+            say(pick(["nap time", "up we go", "*yawn*"]));
+            return;
+          }
+        }
         var roll = Math.random();
         if (roll < 0.24) { p.action = "wander"; p.targetX = 60 + Math.random() * (window.innerWidth - 120); p.thinkT = 2 + Math.random() * 3; }
         else if (roll < 0.42) { p.action = "idle"; p.thinkT = 1.5 + Math.random() * 2.5; }
@@ -924,7 +989,8 @@
       var dx = landX - p.x;
       p.dir = dx >= 0 ? 1 : -1;
       var rise = p.y - spot.top;
-      var vy = -Math.min(1750, Math.sqrt(2 * GRAV * Math.max(140, rise + 40)));
+      // overshoot the apex a little so a long climb actually clears the edge
+      var vy = -Math.min(2400, Math.sqrt(2 * GRAV * Math.max(140, rise + 90)));
       p.perchTop = spot.top; p.perchL = spot.left; p.perchR = spot.right;
       p.mode = "air"; p.vy = vy;
       p.vx = Math.max(-560, Math.min(560, dx * 1.7));
@@ -947,23 +1013,45 @@
         p.sx += (1 - p.sx) * Math.min(1, dt * 10);
         p.sy += (1 - p.sy) * Math.min(1, dt * 10);
         p.y = p.perchTop;
-        p.vx *= 0.6; p.x += p.vx * dt;
         think(dt);
+        // walk along the ledge toward whatever it's chasing
+        if (p.action === "follow" || p.action === "wander") {
+          var pdx = p.targetX - p.x;
+          if (Math.abs(pdx) > 12) {
+            p.dir = pdx > 0 ? 1 : -1;
+            p.vx += (p.dir * 150 * speciesSpeed() - p.vx) * Math.min(1, dt * 8);
+          } else p.vx *= 0.6;
+        } else p.vx *= 0.6;
+        p.x += p.vx * dt;
         if (p.x < p.perchL - 20 || p.x > p.perchR + 20 || p.mode === "air") { // walked/hopped off the ledge
           if (p.mode === "perch") { p.mode = "air"; p.vy = -120; }
         }
         p.legPhase += Math.abs(p.vx) * dt * 0.09;
       } else if (p.mode === "air") {
         p.vy += GRAV * dt;
+        var prevY = p.y;
         p.x += p.vx * dt; p.y += p.vy * dt;
         p.rot += p.angVel * dt;
         p.vx *= 0.995;
         // walls
         if (p.x < HALF - 40) { p.x = HALF - 40; p.vx = Math.abs(p.vx) * 0.5; p.angVel *= -0.5; }
         if (p.x > window.innerWidth - HALF + 40) { p.x = window.innerWidth - HALF + 40; p.vx = -Math.abs(p.vx) * 0.5; p.angVel *= -0.5; }
+        // land on a UI ledge (chat bar, header, card…) on the way down
+        var ledge = (p.vy > 0 && window.__deskPetWorld && window.__deskPetWorld.platformUnder)
+          ? window.__deskPetWorld.platformUnder(p.x, p.y, p.vy, prevY) : null;
+        if (ledge && p.y < fY) {
+          p.y = ledge.y;
+          p.perchTop = ledge.y; p.perchL = ledge.x1; p.perchR = ledge.x2;
+          p.vy = 0; p.vx *= 0.5; p.angVel = 0; p.rot = 0;
+          p.mode = "perch"; p.thinkT = 0.3;
+          if (p.napClimb) { p.napClimb = false; p.emote = "sleep"; p.emoteT = 10; p.eye = "happy"; p.restT = 7; }
+          p.sx = 1.22; p.sy = 0.8;
+          p.eye = "happy"; p.mouth = "happy";
+          if (Math.random() < 0.3) say(pick(["got it!", "up here!", "\u2665", "nice ledge"]));
+        }
         // land
-        if (p.y >= fY) {
-          p.perchTop = 0;
+        else if (p.y >= fY) {
+          p.perchTop = 0; p.napClimb = false;
           p.y = fY;
           var impact = p.vy;
           if (impact > 350) { // bounce
@@ -987,7 +1075,7 @@
         var moving = p.action === "wander" || p.action === "follow";
         if (moving) {
           var dx = p.targetX - p.x;
-          var speed = (p.zoomLeft > 0 ? 430 : (p.action === "follow" ? 190 : 95)) * (p.speedMul == null ? 1 : p.speedMul);
+          var speed = (p.zoomLeft > 0 ? 430 : (p.action === "follow" ? 190 : 95)) * (p.speedMul == null ? 1 : p.speedMul) * speciesSpeed();
           if (Math.abs(dx) > 14) {
             var dirWant = dx > 0 ? 1 : -1;
             p.dir = dirWant;
@@ -995,6 +1083,15 @@
           } else { p.vx *= 0.6; if (p.action === "wander") p.action = "idle"; }
         } else p.vx *= 0.6;
         p.x += p.vx * dt;
+        // DINO: every heavy step shakes the floor and bounces nearby toys
+        if (mySpecies === "dino" && Math.abs(p.vx) > 60) {
+          p.stompT = (p.stompT || 0) + dt;
+          if (p.stompT > 0.5) {
+            p.stompT = 0; p.sx = 1.1; p.sy = 0.88;
+            if (world && world.quake) world.quake(p.x, 150);
+            if (Math.random() < 0.08) say("STOMP");
+          }
+        }
         p.x = Math.max(HALF - 40, Math.min(window.innerWidth - HALF + 40, p.x));
         // leg cycle by speed
         p.legPhase += Math.abs(p.vx) * dt * 0.09;
@@ -1018,6 +1115,7 @@
       p.tailPhase += dt * 3;
       p.ears += ((p.mode === "drag" || p.action === "follow" ? 1 : 0.6) - p.ears) * Math.min(1, dt * 6);
 
+      if (p.carry) { p.carry.x = p.x + p.dir * 34; p.carry.y = p.y - 26; }
       stepItem(dt);
       if (p.sayT > 0) p.sayT -= dt; else p.say = null;
 
@@ -1142,6 +1240,7 @@
       get species() { return mySpecies; },
       destroy: function () {
         if (brain) brain.unregister(brainCtx);
+        if (p.carry && world) { world.release(p.carry, 0, 0); p.carry = null; }
         cancelAnimationFrame(raf);
         el.removeEventListener("pointerdown", onDown);
         window.removeEventListener("pointermove", onMove);
@@ -1171,6 +1270,9 @@
       pets: pets.map(function (pt) { return pt.species; }).slice(0, MAX_PETS),
     });
     if (btnRef) btnRef.style.opacity = pets.length ? "1" : "0.5";
+    // the house belongs to the pets: no pets, no house, no events
+    var h = window.__deskPetHome;
+    if (h) { if (pets.length) h.show(); else h.hide(); }
   }
   window.__deskPetSave = saveState;
 
@@ -1190,14 +1292,22 @@
     pets.splice(i, 1);
     pt.destroy();
     controller = pets[0] || null;
+    if (!pets.length) clearWorld();
     saveState();
   }
   window.__deskPetRemove = removePet;
+
+  /** last pet gone = nothing left to play with, so sweep the floor */
+  function clearWorld() {
+    var w = window.__deskPetWorld;
+    if (w) { try { w.clearAll(); } catch (e) {} }
+  }
 
   function removeAllPets() {
     pets.forEach(function (pt) { pt.destroy(); });
     pets = [];
     controller = null;
+    clearWorld();
     saveState();
   }
   window.__deskPetRemoveAll = removeAllPets;
@@ -1223,5 +1333,9 @@
 
   PallariumModules.onTeardown(MOD, function () {
     removeAllPets();
+    var h = window.__deskPetHome;
+    if (h) { try { h.__kill(); } catch (e) {} }
+    var w = window.__deskPetWorld;
+    if (w) { try { w.__kill(); } catch (e) {} }
   });
 })();

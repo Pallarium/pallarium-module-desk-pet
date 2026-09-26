@@ -696,5 +696,6 @@
     petted: petted,
     statusOf: statusOf,
     count: function () { return pets.length; },
+    all: function () { return pets.slice(); },
   };
 })();
