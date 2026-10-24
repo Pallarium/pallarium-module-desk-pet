@@ -320,8 +320,25 @@
       "position:fixed;left:0;top:0;width:70px;height:16px;z-index:2147482999;pointer-events:none;" +
       "border-radius:50%;background:radial-gradient(ellipse,rgba(0,0,0,.28),transparent 70%);will-change:transform,opacity;";
 
+    // Speech bubble: a page element riding above the pet, not ink on its
+    // 120px canvas — a canvas bubble could not fit more than a couple of words
+    // (the module tips ran off both edges). pointer-events:none keeps it out
+    // of clicks and out of elementsFromPoint (perch detection).
+    var bubble = document.createElement("div");
+    bubble.style.cssText =
+      "position:fixed;left:0;top:0;max-width:220px;z-index:2147483001;pointer-events:none;opacity:0;" +
+      "background:#fff;color:#14151a;font:bold 12px/1.3 system-ui,sans-serif;text-align:center;" +
+      "padding:3px 8px 4px;border-radius:9px;box-shadow:0 2px 8px rgba(0,0,0,.25);will-change:transform,opacity;";
+    var bubbleText = document.createElement("span");
+    var bubbleTail = document.createElement("div");
+    bubbleTail.style.cssText =
+      "position:absolute;top:100%;width:0;height:0;border:5px solid transparent;border-top:7px solid #fff;margin-left:-5px;";
+    bubble.appendChild(bubbleText); bubble.appendChild(bubbleTail);
+    var bubbleSaid = null, bubbleW = 0, bubbleH = 0;
+
     document.body.appendChild(shadow);
     document.body.appendChild(el);
+    document.body.appendChild(bubble);
 
     var floorY = function () { return window.innerHeight - FEET; };
     var p = {
@@ -555,7 +572,8 @@
       }
     }
 
-    function say(text) { p.say = text; p.sayT = 1.6; }
+    // longer lines (the module tips) stay up long enough to read
+    function say(text) { p.say = text; p.sayT = Math.max(1.6, 0.9 + String(text).length * 0.065); }
 
     /** swap the sprite sheets between cat and dog, keeping position + state */
     function setSpecies(kind) {
@@ -1198,24 +1216,20 @@
         ctx.restore();
       }
 
-      // speech bubble (counter-flipped so the text reads normally)
+      // speech bubble: its tail sits where the old in-canvas bubble's did,
+      // and it slides to stay on screen near the edges
       if (p.say) {
-        ctx.save();
-        if (p.dir < 0) { ctx.translate(SIZE, 0); ctx.scale(-1, 1); }
-        ctx.font = "bold 12px system-ui,sans-serif";
-        var tw = ctx.measureText(p.say).width;
-        var bw = tw + 16, bh = 20, bx = HALF - bw / 2, by = 4;
-        ctx.globalAlpha = Math.min(1, p.sayT * 2.2);
-        ctx.fillStyle = "#fff";
-        roundRect(ctx, bx, by, bw, bh, 9); ctx.fill();
-        ctx.beginPath();
-        ctx.moveTo(HALF - 5, by + bh - 1); ctx.lineTo(HALF + 4, by + bh - 1); ctx.lineTo(HALF, by + bh + 7);
-        ctx.closePath(); ctx.fill();
-        ctx.fillStyle = "#14151a";
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText(p.say, HALF, by + bh / 2 + 1);
-        ctx.globalAlpha = 1;
-        ctx.restore();
+        if (bubbleSaid !== p.say) {
+          bubbleSaid = p.say; bubbleText.textContent = p.say;
+          bubbleW = bubble.offsetWidth; bubbleH = bubble.offsetHeight;
+        }
+        var bx = Math.max(4, Math.min(window.innerWidth - bubbleW - 4, p.x - bubbleW / 2));
+        var by = p.y - HALF + 24 - bubbleH;
+        bubbleTail.style.left = Math.max(10, Math.min(bubbleW - 10, p.x - bx)).toFixed(1) + "px";
+        bubble.style.transform = "translate3d(" + bx.toFixed(1) + "px," + by.toFixed(1) + "px,0)";
+        bubble.style.opacity = Math.min(1, p.sayT * 2.2).toFixed(2);
+      } else if (bubbleSaid !== null) {
+        bubbleSaid = null; bubble.style.opacity = "0";
       }
 
       if (item) {
@@ -1249,7 +1263,7 @@
         window.removeEventListener("pointermove", onItemMove);
         window.removeEventListener("pointerup", onItemUp);
         closeMenu();
-        el.remove(); shadow.remove(); itemEl.remove();
+        el.remove(); shadow.remove(); bubble.remove(); itemEl.remove();
       },
     };
     return self;

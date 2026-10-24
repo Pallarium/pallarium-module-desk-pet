@@ -46,6 +46,29 @@
     },
   };
 
+  /* The pal in Pallarium: every so often a pet steps out of character to
+   * say what it is — a module — and that the user can just ask Pallarium to
+   * change it. One pet speaks at a time (shared clock), the first tip comes
+   * ~20s after it lands, then at most one a minute. */
+  var TIP_OPEN = [
+    "psst. i'm a module!",
+    "fun fact: i'm a module",
+    "pallarium built me as a module",
+    "modules are add-ons. i'm one",
+  ];
+  var TIP_ASK = [
+    "ask pallarium to change me. anything!",
+    "say \"make the pet purple\" and watch",
+    "want me in a hat? just ask",
+    "new trick for me? just ask pallarium",
+    "find me in Settings → Modules",
+    "not a pet person? switch me off in Modules",
+    "ask for any module: a timer, a notepad...",
+    "pallarium can build you a module too",
+  ];
+  var TIP_GAP_MS = 60000;
+  var lastTipAt = Date.now() - TIP_GAP_MS + 20000;
+
   function line(ctx, kind) {
     var set = (LINES[ctx.species()] || LINES.cat)[kind] || ["..."];
     return set[(Math.random() * set.length) | 0];
@@ -281,6 +304,23 @@
         p.rotHold = Math.sin(u * 5) * 0.09;
         p.eye = "open";
         if (u > 0.55 && u < 0.59) c.say(line(c, "think"));
+      },
+    },
+    {
+      id: "tip",
+      dur: [5.5, 6.5],
+      weight: function () { return Date.now() - lastTipAt >= TIP_GAP_MS ? 14 : 0; },
+      start: function (c) {
+        lastTipAt = Date.now();
+        c.p.__tip = pick(TIP_ASK);
+        c.say(pick(TIP_OPEN));
+        c.p.eye = "happy"; c.p.mouth = "happy"; c.p.ears = 1;
+      },
+      step: function (c, dt, u) {
+        var p = c.p;
+        p.action = "sit";
+        p.rotHold = Math.sin(u * 4) * 0.05;
+        if (u > 0.42 && p.__tip) { c.say(p.__tip); p.__tip = null; }
       },
     },
     {
